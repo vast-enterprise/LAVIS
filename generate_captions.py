@@ -31,10 +31,11 @@ from baidubce.bce_client_configuration import BceClientConfiguration
 import numpy as np
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--db_host", type=str, default="mysql-test", help="database host")
+parser.add_argument("--db_host", type=str, default="vast-db.rdsm7toamklwzxh.rds.bj.baidubce.com", help="database host")
 parser.add_argument("--db_user", type=str, default="root", help="database user")
-parser.add_argument("--db_password", type=str, default="123456", help="database password")
-parser.add_argument("--db_database", type=str, default="test_caption", help="database name")
+parser.add_argument("--db_port", type=int, default=28564, help="database port")
+parser.add_argument("--db_password", type=str, default="VcUFNW5Kg2", help="database password")
+parser.add_argument("--db_database", type=str, default="vast_data_platform_test", help="database name")
 parser.add_argument("--bos_access_key_id", type=str, default="ALTAKQu6BVji8Rg3GdGEHmYo25", help="bos access key id")
 parser.add_argument("--bos_secret_access_key", type=str, default="9eace348d4a3483c9efd48c819f34e93", help="bos secret access key")
 parser.add_argument("--bos_endpoint", type=str, default="bj.bcebos.com", help="bos endpoint")
@@ -49,6 +50,7 @@ BATCH_SIZE = FLAGS.blip2_generate_batchsize
 DATABASE_CONFIG = {
     "host": FLAGS.db_host,
     "user": FLAGS.db_user,
+    "port": FLAGS.db_port,
     "password": FLAGS.db_password,
     "database": FLAGS.db_database
 }
@@ -129,18 +131,22 @@ def get_images_path(test=True, path=None) -> dict:
                 ret_list.append((img, img))
     elif path is not None and os.path.isdir(path):
         import json
+        img_id = 0
         with open(os.path.join(path, "img_path.json"), "r") as f:
             # 每行是一个json object：
             # {"image_id": 0, "image_path": "path/to/image"}
             test_json = json.load(f)
         for item in test_json:
-            img_id = item["image_id"]
+            # img_id = item["image_id"]
             img_path = item["image_path"]
-            for img in os.listdir(img_path):
-                if not img.startswith("render"):
-                    continue
-                ret_list.append((img_id, os.path.join(img_path, img)))
-            break
+            try:
+                for img in os.listdir(img_path):
+                    if not img.startswith("render"):
+                        continue
+                    ret_list.append((img_id, os.path.join(img_path, img)))
+                    img_id += 1
+            except FileNotFoundError as e:
+                print(f"image_path {img_path} not found")
     return ret_list
 
 time_generate1 = 0
@@ -235,32 +241,56 @@ def write_database(store_caption_list):
     database_config = DATABASE_CONFIG.copy()
     host = database_config.pop("host")
     user = database_config.pop("user")
+    port = database_config.pop("port")
     password = database_config.pop("password")
     database = database_config.pop("database")
     table = database_config.pop("table", "model_image_caption")
     conn = connector.connect(
         host=host,
         user=user,
+        port=port,
         password=password,
         database=database
     )
     conn.start_transaction()
     cursor = conn.cursor()
-    sql = f"INSERT INTO `{database}`.`{table}` (image_id, cap_model_tag, extra, \
+    select_sql = f"SELECT * FROM `{database}`.`{table}` WHERE image_id = '%s' and is_delete = 0"
+    insert_sql = f"INSERT INTO `{database}`.`{table}` (image_id, cap_model_tag, extra, \
         image_embedding_bucket, image_embedding_uri, image_embedding_shape, image_caption, \
         image_caption_embedding_bucket, image_caption_embedding_uri, image_caption_embedding_shape) \
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        VALUES ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')"
+    update_sql = "UPDATE `" + database + "`.`" + table + "` SET cap_model_tag = '{1}', extra = '{2}', \
+        image_embedding_bucket = '{3}', image_embedding_uri = '{4}', image_embedding_shape = '{5}', image_caption = '{6}', \
+        image_caption_embedding_bucket = '{7}', image_caption_embedding_uri = '{8}', image_caption_embedding_shape = '{9}' \
+        WHERE image_id = '{0}' and is_delete = 0"
     try:
+        insert_cnt, update_cnt, skip_cnt = 0, 0, 0
         for image_id, image_embedding_uri, image_caption, image_caption_embedding_uri in store_caption_list:
-            cursor.execute(sql % (image_id, "LAVIS-blip2_t5-xxl,CLIP-ViT-B/32", '', 'image_embedding_bucket',\
+            cursor.execute(select_sql % image_id)
+            record = cursor.fetchall()
+            assert len(record) == 0 or len(record) == 1, "valid image_id should be unique"
+            # TODO: 用配置文件管理固定的值
+            tmp = (image_id, "LAVIS-blip2_t5-xxl,CLIP-ViT-B/32", '{}', 'image_embedding_bucket',\
                                 image_embedding_uri, '(32, 256)', image_caption, 'image_caption_embedding_bucket',\
-                                image_caption_embedding_uri, '(256,)'))
+                                image_caption_embedding_uri, '(256,)')
+            if len(record) == 1:
+                if record[0][1:11] == tmp:
+                    print(f"image_id {image_id} already exists in database, and there is no change, so skip...")
+                    skip_cnt += 1
+                else:
+                    print(f"image_id {image_id} already exists in database, but there are changes, so update...")
+                    cursor.execute(update_sql.format(*tmp))
+                    update_cnt += 1
+            else:
+                tmp = insert_sql % tmp
+                cursor.execute(tmp)
+                insert_cnt += 1
         conn.commit()
-        print("write to database successfully")
-    except Exception as e:
-        print("write to database failed, reason: ")
-        print(e)
+        print(f"write to database successfully, insert {insert_cnt} rows, update {update_cnt} rows, skip {skip_cnt} rows")
+    except Exception:
         conn.rollback()
+        print("fail to write to database")
+        raise
     finally:
         cursor.close()
         conn.close()
@@ -295,6 +325,7 @@ def save_to_file(embeddings:List[torch.Tensor], bucket_name, local_img_path_list
         bos_client.put_object_from_file(bucket_name, bos_img_path[i], 'temp.npy')
     if os.path.exists('temp.npy'):
         os.remove('temp.npy')
+    return bos_img_path
 
 # ############################################################################
 # # TODO:
@@ -322,12 +353,14 @@ if __name__ == "__main__":
     # cos_sim = sim.max(1)
     # FIXME: 这里暂时用image_path作为桶内的uri，之后改为上游任务传来的uri
     img_path_list = [*zip(*selected_caption_list)][1]
-    save_to_file(image_feats, 'image-embedding-bucket', img_path_list)
-    save_to_file(text_feats, 'image-caption-embedding-bucket', img_path_list)
+    image_uri_list = save_to_file(image_feats, 'image-embedding-bucket', img_path_list)
+    caption_uri_list = save_to_file(text_feats, 'image-caption-embedding-bucket', img_path_list)
     print('embedding存bos成功')
     print(selected_caption_list)
-    # write_database([(image_id, image_uri, caption, caption_uri) for \
-    #                 (image_id, _, caption), image_uri, caption_uri in zip(selected_caption_list, image_uri_list, caption_uri_list)])
+    tic = time()
+    write_database([(image_id, image_uri, caption, caption_uri) for \
+                    (image_id, _, caption), image_uri, caption_uri in zip(selected_caption_list, image_uri_list, caption_uri_list)])
+    print(f'time_write_database is {time() - tic}')
     # send_message_to_mq()
 
 
