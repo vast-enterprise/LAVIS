@@ -31,14 +31,16 @@ from baidubce.bce_client_configuration import BceClientConfiguration
 import numpy as np
 
 parser = argparse.ArgumentParser()
-argparse.add_argument("--db_host", type=str, default="mysql-test", help="database host")
-argparse.add_argument("--db_user", type=str, default="root", help="database user")
-argparse.add_argument("--db_password", type=str, default="123456", help="database password")
-argparse.add_argument("--db_database", type=str, default="test_caption", help="database name")
-argparse.add_argument("--bos_access_key_id", type=str, default="ALTAKQu6BVji8Rg3GdGEHmYo25", help="bos access key id")
-argparse.add_argument("--bos_secret_access_key", type=str, default="9eace348d4a3483c9efd48c819f34e93", help="bos secret access key")
-argparse.add_argument("--bos_endpoint", type=str, default="bj.bcebos.com", help="bos endpoint")
-argparse.add_argument("--blip2_generate_batchsize", type=int, default=5, help="blip2 t5 generate batchsize, must not be bigger than 6, otherwise OOM")
+parser.add_argument("--db_host", type=str, default="mysql-test", help="database host")
+parser.add_argument("--db_user", type=str, default="root", help="database user")
+parser.add_argument("--db_password", type=str, default="123456", help="database password")
+parser.add_argument("--db_database", type=str, default="test_caption", help="database name")
+parser.add_argument("--bos_access_key_id", type=str, default="ALTAKQu6BVji8Rg3GdGEHmYo25", help="bos access key id")
+parser.add_argument("--bos_secret_access_key", type=str, default="9eace348d4a3483c9efd48c819f34e93", help="bos secret access key")
+parser.add_argument("--bos_endpoint", type=str, default="bj.bcebos.com", help="bos endpoint")
+parser.add_argument("--bos_parent_folder", type=str, default="zero_render", help="bos parent folder which denotes the data source")
+# argparse.add_argument("--mq_xxx", type=str, default="bj.bcebos.com", help="bos endpoint")
+parser.add_argument("--blip2_generate_batchsize", type=int, default=5, help="blip2 t5 generate batchsize, must not be bigger than 6, otherwise OOM")
 FLAGS = parser.parse_args()
 
 # setup device to use
@@ -57,6 +59,7 @@ BOS_CONFIG = BceClientConfiguration(
     ),
     endpoint=FLAGS.bos_endpoint
 )
+DATA_SOURCE = FLAGS.bos_parent_folder
 
 def get_caption_blip2_model(try_parellel=False):
     if try_parellel:
@@ -104,14 +107,13 @@ def get_image_from_path(image_path):
 def get_images_path(test=True, path=None) -> dict:
     """
     TODO:
-    get imgs paths, imgs: (N, 22, 3, H, W)                                               
+    get imgs paths, imgs: (N, 24, 3, H, W)                                               
     where N denotes the total num of a batch images
     the amount may be enormous, so just keep the path instead of the raw imgs
 
     return: [(image_id, pic_absolute_path)]
     """
     ret_list = []
-    import ipdb; ipdb.set_trace()
     if test:
         pic_folder = "/mnt/pfs/users/wangdehu/tmp_dir"
         sub_folder_list = os.listdir(pic_folder)
@@ -132,7 +134,13 @@ def get_images_path(test=True, path=None) -> dict:
             # {"image_id": 0, "image_path": "path/to/image"}
             test_json = json.load(f)
         for item in test_json:
-            ret_list.append((item["image_id"], item["image_path"]))
+            img_id = item["image_id"]
+            img_path = item["image_path"]
+            for img in os.listdir(img_path):
+                if not img.startswith("render"):
+                    continue
+                ret_list.append((img_id, os.path.join(img_path, img)))
+            break
     return ret_list
 
 time_generate1 = 0
@@ -146,8 +154,6 @@ def generate_coarse_captions(images_path_list) -> torch.Tensor():
     return list: [(img_id, image_path, coarse_captions[])]
     """
     global time_generate1, time_generate2, BATCH_SIZE, model, vis_processors
-    if model is None:
-        model, vis_processors = get_caption_blip2_model()
     prompt = "Question: what object is in this image? Answer:"
     full_prompt = "Question: what is the structure and geometry of this %s?"
     ret_list = []
@@ -159,6 +165,8 @@ def generate_coarse_captions(images_path_list) -> torch.Tensor():
             tmp_img_path_list = images_path_list
             images_path_list = []
         image_list = [get_image_from_path(image_tuple[1]) for image_tuple in tmp_img_path_list]
+        if model is None:
+            model, vis_processors = get_caption_blip2_model()
         image_list = [vis_processors["eval"](image).unsqueeze(0).to(device) for image in image_list]
         batch_image = torch.cat(image_list, dim=0)
         tic = time()
@@ -264,19 +272,11 @@ def get_bos_client():
         bos_client = BosClient(BOS_CONFIG)
     return bos_client
 
-import hashlib
-def calculate_md5_numpy_array(numpy_array):
-    array_bytes = numpy_array.tobytes()
-    md5_hash = hashlib.md5()
-    md5_hash.update(array_bytes)
-    md5_hexdigest = md5_hash.hexdigest()
-    return md5_hexdigest
-
 # ############################################################################
 # # TODO:
 # # Save image and caption embeddings to files
 # ############################################################################
-def save_to_file(embeddings:List[torch.Tensor], bucket_name, file_uri_list):
+def save_to_file(embeddings:List[torch.Tensor], bucket_name, local_img_path_list):
     """
     make sure the idempotence of saving progress
     """
@@ -285,10 +285,14 @@ def save_to_file(embeddings:List[torch.Tensor], bucket_name, file_uri_list):
         bos_client.does_bucket_exist(bucket_name)
     except Exception as e:
         raise Exception("bucket不存在，请先创建bucket", e)
+    bos_img_path = []
+    for img_path in local_img_path_list:
+        img_path = os.path.splitext(img_path)[0] + '.npy'
+        bos_img_path.append(os.path.join(DATA_SOURCE, *img_path.split(os.path.sep)[-3:]))
     for i, embed in enumerate(embeddings):
-        embed_numpy = embed.numpy()
+        embed_numpy = embed.cpu().numpy()
         np.save('temp', embed_numpy)
-        bos_client.put_object_from_file(bucket_name, file_uri_list[i], 'temp.npy')
+        bos_client.put_object_from_file(bucket_name, bos_img_path[i], 'temp.npy')
     if os.path.exists('temp.npy'):
         os.remove('temp.npy')
 
@@ -317,12 +321,15 @@ if __name__ == "__main__":
     # sim = sim.reshape(bs, -1)
     # cos_sim = sim.max(1)
     # FIXME: 这里暂时用image_path作为桶内的uri，之后改为上游任务传来的uri
-    image_uri_list = save_to_file(image_feats, 'image_embedding_bucket', zip(*selected_caption_list)[1]) 
-    caption_uri_list = save_to_file(text_feats, 'image_caption_embedding_bucket', zip(*selected_caption_list)[1])
+    img_path_list = [*zip(*selected_caption_list)][1]
+    save_to_file(image_feats, 'image-embedding-bucket', img_path_list)
+    save_to_file(text_feats, 'image-caption-embedding-bucket', img_path_list)
     print('embedding存bos成功')
-    write_database([(image_id, image_uri, caption, caption_uri) for \
-                    (image_id, _, caption), image_uri, caption_uri in zip(selected_caption_list, image_uri_list, caption_uri_list)])
-    send_message_to_mq()
+    print(selected_caption_list)
+    # write_database([(image_id, image_uri, caption, caption_uri) for \
+    #                 (image_id, _, caption), image_uri, caption_uri in zip(selected_caption_list, image_uri_list, caption_uri_list)])
+    # send_message_to_mq()
+
 
 # batchsize 2:
 # time_generate1 is 12.068463802337646
