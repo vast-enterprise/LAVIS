@@ -1,5 +1,4 @@
 import os
-from pprint import pprint
 
 os.environ['HUGGINGFACE_HUB_CACHE'] = "/mnt/pfs/share/pretrained_model/.cache/huggingface/hub"
 os.environ['TRANSFORMERS_OFFLINE'] = "1"
@@ -40,13 +39,17 @@ parser.add_argument("--bos_access_key_id", type=str, default="ALTAKQu6BVji8Rg3Gd
 parser.add_argument("--bos_secret_access_key", type=str, default="9eace348d4a3483c9efd48c819f34e93", help="bos secret access key")
 parser.add_argument("--bos_endpoint", type=str, default="bj.bcebos.com", help="bos endpoint")
 parser.add_argument("--bos_parent_folder", type=str, default="zero_render", help="bos parent folder which denotes the data source")
-# argparse.add_argument("--mq_xxx", type=str, default="bj.bcebos.com", help="bos endpoint")
-parser.add_argument("--blip2_generate_batchsize", type=int, default=5, help="blip2 t5 generate batchsize, must not be bigger than 6, otherwise OOM")
+# parser.add_argument("--mq_xxx", type=str, default="bj.bcebos.com", help="bos endpoint")
+parser.add_argument("--image_json_path", type=str, default="/mnt/pfs/share/yuanze/LAVIS/img_path.json", help="path to json file which contains [{img_id, path}]")
+parser.add_argument("--blip2_generate_batchsize", type=int, default=5, help="blip2 t5 generate batchsize, better not be bigger than 6, otherwise may OOM")
+parser.add_argument("--blip2_generate_num_captions", type=int, default=5, help="blip2 t5 generate num_captions")
 FLAGS = parser.parse_args()
 
 # setup device to use
 device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = FLAGS.blip2_generate_batchsize
+NUM_CAPTIONS = FLAGS.blip2_generate_num_captions
+IMAGE_JSON_PATH = FLAGS.image_json_path
 DATABASE_CONFIG = {
     "host": FLAGS.db_host,
     "user": FLAGS.db_user,
@@ -106,7 +109,7 @@ def get_image_from_path(image_path):
         image_dict[image_path] = Image.open(image_path).convert('RGB')
     return image_dict[image_path]
 
-def get_images_path(test=True, path=None) -> dict:
+def get_images_path(test=True, jsonpath=None) -> dict:
     """
     TODO:
     get imgs paths, imgs: (N, 24, 3, H, W)                                               
@@ -129,14 +132,15 @@ def get_images_path(test=True, path=None) -> dict:
                     continue
                 img = os.path.join(sub_folder, img)
                 ret_list.append((img, img))
-    elif path is not None and os.path.isdir(path):
+    elif jsonpath is not None and os.path.isfile(jsonpath):
         import json
         img_id = 0
-        with open(os.path.join(path, "img_path.json"), "r") as f:
+        with open(jsonpath, "r") as f:
             # 每行是一个json object：
             # {"image_id": 0, "image_path": "path/to/image"}
             test_json = json.load(f)
         for item in test_json:
+            # FIXME: 这里暂时用cnt作为img_id，之后改为上游任务传来的img_id
             # img_id = item["image_id"]
             img_path = item["image_path"]
             try:
@@ -155,11 +159,10 @@ model, vis_processors = None, None
 
 def generate_coarse_captions(images_path_list) -> torch.Tensor():
     """
-    TODO:
     generate coarse captions
     return list: [(img_id, image_path, coarse_captions[])]
     """
-    global time_generate1, time_generate2, BATCH_SIZE, model, vis_processors
+    global time_generate1, time_generate2, BATCH_SIZE, model, vis_processors, NUM_CAPTIONS
     prompt = "Question: what object is in this image? Answer:"
     full_prompt = "Question: what is the structure and geometry of this %s?"
     ret_list = []
@@ -180,10 +183,10 @@ def generate_coarse_captions(images_path_list) -> torch.Tensor():
         time_generate1 += time() - tic
         print(len(object_list))
         tic = time()
-        coarse_caption_list = model.generate({"image": batch_image, "prompt": [full_prompt % object for object in object_list]}, use_nucleus_sampling=True, num_captions=5)
+        coarse_caption_list = model.generate({"image": batch_image, "prompt": [full_prompt % object for object in object_list]}, use_nucleus_sampling=True, num_captions=NUM_CAPTIONS)
         time_generate2 += time() - tic
         for i in range(len(tmp_img_path_list)):
-            ret_list.append((*tmp_img_path_list[i], coarse_caption_list[i * 5: (i + 1) * 5]))
+            ret_list.append((*tmp_img_path_list[i], coarse_caption_list[i * NUM_CAPTIONS: (i + 1) * NUM_CAPTIONS]))
         # what is coarse caption's length?
     return ret_list
 
@@ -271,8 +274,8 @@ def write_database(store_caption_list):
             assert len(record) == 0 or len(record) == 1, "valid image_id should be unique"
             # TODO: 用配置文件管理固定的值
             tmp = (image_id, "LAVIS-blip2_t5-xxl,CLIP-ViT-B/32", '{}', 'image_embedding_bucket',\
-                                image_embedding_uri, '(32, 256)', image_caption, 'image_caption_embedding_bucket',\
-                                image_caption_embedding_uri, '(256,)')
+                                image_embedding_uri, '(32, 256)', image_caption.replace("'", "\\'").replace('"', '\\"'), \
+                                'image_caption_embedding_bucket', image_caption_embedding_uri, '(256,)')
             if len(record) == 1:
                 if record[0][1:11] == tmp:
                     print(f"image_id {image_id} already exists in database, and there is no change, so skip...")
@@ -314,6 +317,7 @@ def save_to_file(embeddings:List[torch.Tensor], bucket_name, local_img_path_list
     try: 
         bos_client.does_bucket_exist(bucket_name)
     except Exception as e:
+        # FIXME: 使用前得手动创建bucket
         raise Exception("bucket不存在，请先创建bucket", e)
     bos_img_path = []
     for img_path in local_img_path_list:
@@ -335,7 +339,7 @@ def send_message_to_mq():
     pass
 
 if __name__ == "__main__":
-    images_path_list = get_images_path(False, '/mnt/pfs/share/yuanze/LAVIS')
+    images_path_list = get_images_path(False, IMAGE_JSON_PATH)
     coarse_caption_list = generate_coarse_captions(images_path_list)
     model, vis_processors = None, None
     print(f'time_generate1 is {time_generate1}')
@@ -356,7 +360,6 @@ if __name__ == "__main__":
     image_uri_list = save_to_file(image_feats, 'image-embedding-bucket', img_path_list)
     caption_uri_list = save_to_file(text_feats, 'image-caption-embedding-bucket', img_path_list)
     print('embedding存bos成功')
-    print(selected_caption_list)
     tic = time()
     write_database([(image_id, image_uri, caption, caption_uri) for \
                     (image_id, _, caption), image_uri, caption_uri in zip(selected_caption_list, image_uri_list, caption_uri_list)])
