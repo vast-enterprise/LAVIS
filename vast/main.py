@@ -19,6 +19,18 @@ from client.database import write_image_caption_to_database, get_image_paths_fro
 from client.message_queue import produce_message
 import image_fetch
 
+import random
+import numpy as np
+import torch
+from transformers import set_seed
+
+seed = 42
+set_seed(seed)
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+
 def get_bos_uri(datasource, img_path):
     img_path = os.path.splitext(img_path)[0] + '.npy'
     return os.path.join(datasource, *img_path.split(os.path.sep)[-3:])
@@ -40,6 +52,7 @@ if __name__ == "__main__":
         )
     if is_test:
         task_path = "20230731/transcode/task-runw3idfmlfdl1exasn.txt"
+    statistics = {}
     for i, task in enumerate(get_task_from_bos(task_path)):
         print("执行第{}个任务".format(i + 1))
         try:
@@ -47,8 +60,12 @@ if __name__ == "__main__":
             print(f'\n获得模型图片路径成功，读取该模型\"{task["name"]}\"共{len(image_path_list)}张图片\n')
             coarse_caption_list = generate_coarse_captions(image_path_list)
             print(f'\n获得粗糙描述成功\n')
-            # pprint(coarse_caption_list)
-            selected_caption_list = select_captions(coarse_caption_list)
+            selected_caption_list, bucket = select_captions(coarse_caption_list)
+            for k, v in bucket.items():
+                if k not in statistics:
+                    statistics[k] = v
+                else:
+                    statistics[k] += v
             image_feats, text_feats = extract_features(*zip(*selected_caption_list)) # image_feats: [(32, 256) * bs], text_feats: [(256,) * bs]
             img_path_list = [*zip(*selected_caption_list)][1]
             uri_list = [get_bos_uri(task['source'], img_path) for img_path in img_path_list]
@@ -88,3 +105,8 @@ if __name__ == "__main__":
             traceback.print_exc()
         finally:
             image_fetch.image_dict = dict()
+        break
+    print("clip选用的比例:")
+    total = sum(statistics.values())
+    for k, v in statistics.items():
+        print(f"第{k}个coarse caption的选用比例: {v/total:.2%}")

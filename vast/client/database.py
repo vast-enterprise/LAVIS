@@ -104,6 +104,7 @@ def write_image_caption_to_database(store_caption_list):
 
 def get_image_paths_from_model_id(model_id):
     conn = get_database_connection()
+    # FIXME: 选择8个角上的图片
     name_like = [f"name LIKE 'render_00{i:02d}%'" for i in range(6, 14)]
     name_like = " OR ".join(name_like)
     name_like = ' AND (' + name_like + ')'
@@ -117,3 +118,22 @@ def get_image_paths_from_model_id(model_id):
         raise
     finally:
         cursor.close()
+
+
+if __name__ == '__main__':
+    select_sql = f"SELECT image_caption FROM `{DB_DATABASE}`.`{DB_CAPTION_TABLE}` WHERE image_id = '%s' and is_delete = 0"
+    conn = get_database_connection()
+    for i in range(1, 11):
+        print('\n'*5)
+        print(f"获取第{i}个模型的caption")
+        path_list = get_image_paths_from_model_id(i)
+        print(path_list[0][1])
+        print('\n')
+        caption_list = []
+        for image_id, pfs_path in path_list:
+            cursor = conn.cursor()
+            cursor.execute(select_sql % image_id)
+            records = cursor.fetchall()
+            assert len(records) == 1
+            caption_list.append(records[0][0])
+        print(". ".join(caption_list))

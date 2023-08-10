@@ -13,8 +13,8 @@ from tqdm import tqdm
 from image_fetch import get_image_from_path
 
 device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = environ.get("blip2_generate_batchsize", 5)
-NUM_CAPTIONS = environ.get("blip2_generate_num_captions", 5)
+BATCH_SIZE = int(environ.get("blip2_generate_batchsize", 5))
+NUM_CAPTIONS = int(environ.get("blip2_generate_num_captions", 5))
 
 model, vis_processors = None, None
 
@@ -89,6 +89,7 @@ def generate_coarse_captions(images_path_list) -> torch.Tensor():
             tic = time()
             coarse_caption_list = model.generate({"image": batch_image, "prompt": [full_prompt % object for object in object_list]}, use_nucleus_sampling=True, num_captions=NUM_CAPTIONS)
             time_generate2 += time() - tic
+            coarse_caption_list = [caption.capitalize() for caption in coarse_caption_list]
             for i in range(len(tmp_img_path_list)):
                 ret_list.append((*tmp_img_path_list[i], coarse_caption_list[i * NUM_CAPTIONS: (i + 1) * NUM_CAPTIONS]))
             pbar.update(len(tmp_img_path_list))
