@@ -39,12 +39,12 @@ if __name__ == "__main__":
             "CONDUCTOR_TASK_ID_KEY nor CONDUCTOR_TASK_STREAM_KEY not found in environment variables"
         )
     if is_test:
-        task_path = "conductor-task/20230808/caption"
+        task_path = "20230731/transcode/task-runw3idfmlfdl1exasn.txt"
     for i, task in enumerate(get_task_from_bos(task_path)):
         print("执行第{}个任务".format(i + 1))
         try:
             image_path_list = get_image_paths_from_model_id(task['id'])
-            print(f'\n获得模型图片路径成功，该模型\"{task["name"]}\"共{len(image_path_list)}张图片\n')
+            print(f'\n获得模型图片路径成功，读取该模型\"{task["name"]}\"共{len(image_path_list)}张图片\n')
             coarse_caption_list = generate_coarse_captions(image_path_list)
             print(f'\n获得粗糙描述成功\n')
             # pprint(coarse_caption_list)
@@ -57,6 +57,8 @@ if __name__ == "__main__":
             print('embedding存bos成功')
             write_image_caption_to_database([(image_id, bos_uri, caption, bos_uri) for \
                             (image_id, _, caption), bos_uri in zip(selected_caption_list, uri_list)])
+            # write_image_caption_to_database([(image_id, 'test_uri', 'test', 'test_uri') for \
+            #                 (image_id, _) in image_path_list])
             print('写数据库成功')
             if not is_test:
                 produce_message(

@@ -59,7 +59,10 @@ def write_image_caption_to_database(store_caption_list):
     conn = get_database_connection()
     conn.begin()
     cursor = conn.cursor()
-    select_sql = f"SELECT * FROM `{DB_DATABASE}`.`{DB_CAPTION_TABLE}` WHERE image_id = '%s' and is_delete = 0"
+    select_sql = f"SELECT image_id, cap_model_tag, extra, \
+            image_embedding_bucket, image_embedding_uri, image_embedding_shape, image_caption, \
+            image_caption_embedding_bucket, image_caption_embedding_uri, image_caption_embedding_shape \
+            FROM `{DB_DATABASE}`.`{DB_CAPTION_TABLE}` WHERE image_id = '%s' and is_delete = 0"
     insert_sql = f"INSERT INTO `{DB_DATABASE}`.`{DB_CAPTION_TABLE}` (image_id, cap_model_tag, extra, \
         image_embedding_bucket, image_embedding_uri, image_embedding_shape, image_caption, \
         image_caption_embedding_bucket, image_caption_embedding_uri, image_caption_embedding_shape) \
@@ -79,7 +82,7 @@ def write_image_caption_to_database(store_caption_list):
                                 image_embedding_uri, '(32, 256)', image_caption.replace("'", "\\'").replace('"', '\\"'), \
                                 'image_caption_embedding_bucket', image_caption_embedding_uri, '(256,)')
             if len(record) == 1:
-                if record[0][1:11] == tmp:
+                if record[0][0:10] == tmp:
                     print(f"image_id {image_id} already exists in database, and there is no change, so skip...")
                     skip_cnt += 1
                 else:
@@ -101,10 +104,13 @@ def write_image_caption_to_database(store_caption_list):
 
 def get_image_paths_from_model_id(model_id):
     conn = get_database_connection()
-    select_sql = f"SELECT id, pfs_path FROM `{DB_DATABASE}`.`{DB_IMAGE_TABLE}` WHERE model_id = %s and is_delete = 0 and type = 'render'"
+    name_like = [f"name LIKE 'render_00{i:02d}%'" for i in range(6, 14)]
+    name_like = " OR ".join(name_like)
+    name_like = ' AND (' + name_like + ')'
+    select_sql = f"SELECT id, pfs_path FROM `{DB_DATABASE}`.`{DB_IMAGE_TABLE}` WHERE model_id = {model_id} and is_delete = 0 and type = 'render'" + name_like
     try:
         cursor = conn.cursor()
-        cursor.execute(select_sql % model_id)
+        cursor.execute(select_sql)
         return cursor.fetchall()
     except Exception:
         print("fail to read from database")
