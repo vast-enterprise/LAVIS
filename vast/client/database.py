@@ -5,6 +5,7 @@ DB_USER = environ.get("DB_USER")
 DB_PORT = environ.get("DB_PORT")
 DB_PASSWORD = environ.get("DB_PASSWORD")
 DB_DATABASE = environ.get("DB_DATABASE")
+DB_RENDER_TYPE = environ.get("DB_RENDER_TYPE")
 DB_CAPTION_TABLE = environ.get("DB_CAPTION_TABLE", "model_image_caption")
 DB_IMAGE_TABLE = environ.get("DB_IMAGE_TABLE", "model_image")
 
@@ -19,6 +20,8 @@ if DB_PASSWORD is None:
     error_list.append("DB_PASSWORD")
 if DB_DATABASE is None:
     error_list.append("DB_DATABASE")
+if DB_RENDER_TYPE is None:
+    error_list.append("DB_RENDER_TYPE")
 assert len(error_list) == 0, "Please set the following environment variables: {}".format(", ".join(error_list))
 
 import pymysql
@@ -108,7 +111,7 @@ def get_image_paths_from_model_id(model_id):
     name_like = [f"name LIKE 'render_00{i:02d}%'" for i in range(6, 14)]
     name_like = " OR ".join(name_like)
     name_like = ' AND (' + name_like + ')'
-    select_sql = f"SELECT id, pfs_path FROM `{DB_DATABASE}`.`{DB_IMAGE_TABLE}` WHERE model_id = {model_id} and is_delete = 0 and type = 'render'" + name_like
+    select_sql = f"SELECT id, pfs_path FROM `{DB_DATABASE}`.`{DB_IMAGE_TABLE}` WHERE model_id = {model_id} and is_delete = 0 and type = '{DB_RENDER_TYPE}'" + name_like
     try:
         cursor = conn.cursor()
         cursor.execute(select_sql)
